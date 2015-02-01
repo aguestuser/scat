@@ -4,6 +4,7 @@ import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.{AsynchronousServerSocketChannel, AsynchronousSocketChannel, CompletionHandler}
 
+import scala.collection.parallel.immutable.ParSeq
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.Duration
 import scala.concurrent.{Await, Future, Promise}
@@ -13,9 +14,9 @@ import scala.concurrent.{Await, Future, Promise}
  */
 object RunServer extends App {
   try {
-    val chn = Server.getChannel(args(0).toInt)
-    val socks = List[AsynchronousSocketChannel]()
-    Server.listen(chn, socks)
+    val serverSock = Server.getChannel(args(0).toInt)
+    val clientSocks = List[AsynchronousSocketChannel]()
+    Server.listenForConnections(serverSock, clientSocks)
   } catch {
     case e: NumberFormatException => throw new NumberFormatException("Port number for scat must be a valid int")
   }
@@ -23,26 +24,28 @@ object RunServer extends App {
 
 object Server {
 
+  type SSC = AsynchronousServerSocketChannel
+  type SC = AsynchronousSocketChannel
+
   def getChannel(port: Int): AsynchronousServerSocketChannel =
     AsynchronousServerSocketChannel.open().bind(new InetSocketAddress(port))
 
-  def listen(chn: AsynchronousServerSocketChannel, socks: List[AsynchronousSocketChannel]) : Unit = {
+  def listenForConnections(sSock: SSC, socks: List[SC]) : Unit = {
 
-    println(s"Listening on port ${chn.getLocalAddress.toString}")
+    println(s"Listening on port ${sSock.getLocalAddress.toString}")
     if (socks.size > 0) println(s"Clients at: ${socks map {_.getLocalAddress}}")
 
-    val newSock = accept(chn)
-    Await.result(newSock, Duration.Inf)
-    newSock onSuccess { case ns => echoMany(ns :: socks)}
+    val newSock = acceptConnection(sSock)
+    newSock onSuccess { case ns => listenForMessages(ns :: socks)}
 
-    listen(chn, socks)
+    listenForConnections(sSock, Await.result(newSock, Duration.Inf) :: socks )
   }
 
-  def accept(chn: AsynchronousServerSocketChannel): Future[AsynchronousSocketChannel] = {
-    val p = Promise[AsynchronousSocketChannel]()
-    chn.accept(null, new CompletionHandler[AsynchronousSocketChannel, Void] {
-      def completed(sock: AsynchronousSocketChannel, att: Void) = {
-        println(s"Client connection received from ${sock.getLocalAddress.toString}")
+  def acceptConnection(sSock: SSC): Future[SC] = {
+    val p = Promise[SC]()
+    sSock.accept(null, new CompletionHandler[SC, Void] {
+      def completed(sock: SC, att: Void) = {
+        println(s"Client connection received from ${sock.getRemoteAddress}")
         p success { sock }
       }
       def failed(e: Throwable, att: Void) = p failure { e }
@@ -50,22 +53,33 @@ object Server {
     p.future
   }
 
-  def echoMany(socks: List[AsynchronousSocketChannel]): List[Future[Unit]] =
-    socks map { echoOne } flatMap { _ => echoMany(socks)}
+  def listenForMessages(socks: List[SC]): ParSeq[Future[List[Unit]]] =
+//    socks map { s =>
+//      val done = relayOne(s, socks)
+//      Await.result(done, Duration.Inf)
+//    }
+//    Future sequence { socks map { s => relayOne(s, socks) }}
+    socks.par map { s => relayMessage(s, socks) }
 
 
-  def echoOne(sock: AsynchronousSocketChannel): Future[Unit] =
-    for {
+  def relayMessage(sock: SC, socks: List[SC]): Future[List[Unit]] = {
+    { for {
       input <- read(sock)
-      done <- dispatchInput(input, sock)
-    } yield done
+      dones <- routeInput(input, sock, socks)
+    } yield dones } flatMap { _ => relayMessage(sock, socks) }
+//    for {
+//      input <- read(sock)
+//      dones <- routeInput(input, sock, socks)
+//    } yield dones
+  }
 
-  def read(sock: AsynchronousSocketChannel): Future[Array[Byte]] = {
+
+  def read(sock: SC): Future[Array[Byte]] = {
     val buf = ByteBuffer.allocate(1024) // TODO what happens to this memory allocation?
     val p = Promise[Array[Byte]]()
     sock.read(buf, null, new CompletionHandler[Integer, Void] {
       def completed(numRead: Integer, att: Void) = {
-        println(s"Read ${numRead.toString} bytes")
+        println(s"Read $numRead bytes")
         buf.flip()
         p success { buf.array() }
       }
@@ -74,33 +88,38 @@ object Server {
     p.future
   }
 
-  def dispatchInput(input: Array[Byte], sock: AsynchronousSocketChannel) : Future[Unit] = {
-    if (input.map(_.toChar).mkString.trim == "exit") Future.successful(())
-    else write(input,sock)
+  def routeInput(input: Array[Byte], sock: SC, socks: List[SC]) : Future[List[Unit]] = {
+    if (input.map(_.toChar).mkString.trim == "exit"){ sock.close(); Future.successful(List(())) }
+    else writeToAll(input,sock, socks)
   }
 
-  def write(bs: Array[Byte], sock: AsynchronousSocketChannel): Future[Unit] = {
+  def writeToAll(bs: Array[Byte], sock: SC, socks: List[SC]): Future[List[Unit]] = {
+    Future sequence { socks map { sock => writeToOne(bs, sock) } }
+//    val dones = for { sock <- socks }
+//      yield for { done <- writeToOne(bs, sock) }
+//        yield  { done }
+//    Future.sequence { dones }
+  }
+  
+  def writeToOne(bs: Array[Byte], sock: SC): Future[Unit] = {
     for {
-      numWritten <- writeOnce(bs, sock)
-      res <- dispatchWrite(numWritten, bs, sock)
+      numwrit <- writeOnce(bs, sock)
+      res <- dispatchWrite(numwrit, bs, sock)
     } yield res
   }
 
-  def writeOnce(bs: Array[Byte], chn: AsynchronousSocketChannel): Future[Integer] = {
+  def writeOnce(bs: Array[Byte], sock: SC): Future[Integer] = {
     val p = Promise[Integer]()
-    chn.write(ByteBuffer.wrap(bs), null, new CompletionHandler[Integer, Void] {
-      def completed(numWritten: Integer, att: Void) = {
-        println(s"Echoed ${numWritten.toString} bytes")
-        p success { numWritten }
-      }
+    sock.write(ByteBuffer.wrap(bs), null, new CompletionHandler[Integer, Void] {
+      def completed(numwrit: Integer, att: Void) = { println(s"Relayed $numwrit bytes"); p success { numwrit } } 
       def failed(e: Throwable, att: Void) = p failure { e }
     })
     p.future
   }
 
-  def dispatchWrite(numWritten: Int, bs: Array[Byte], sock: AsynchronousSocketChannel): Future[Unit] = {
-    if(numWritten == bs.size) Future.successful(())
-    else write(bs.drop(numWritten), sock)
+  def dispatchWrite(numwrit: Int, bs: Array[Byte], sock: SC): Future[Unit] = {
+    if(numwrit == bs.size) Future.successful(())
+    else writeToOne(bs.drop(numwrit), sock)
   }
 }
 
