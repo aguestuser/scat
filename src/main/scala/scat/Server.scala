@@ -4,19 +4,21 @@ import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.{AsynchronousServerSocketChannel, AsynchronousSocketChannel, CompletionHandler}
 
-import scala.collection.parallel.immutable.ParSeq
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.Duration
 import scala.concurrent.{Await, Future, Promise}
 
 /**
- * Created by aguestuser on 1/31/15.
+ * Author: Austin Guest
+ * Date: 1/31/15
+ * License: GPL2
  */
+
 object RunServer extends App {
   try {
-    val serverSock = Server.getChannel(args(0).toInt)
+    val serverSock = Server.getServerSock(args(0).toInt)
     val clientSocks = List[AsynchronousSocketChannel]()
-    Server.listenForConnections(serverSock, clientSocks)
+    Server.listenForSocks(serverSock, clientSocks)
   } catch {
     case e: NumberFormatException => throw new NumberFormatException("Port number for scat must be a valid int")
   }
@@ -27,21 +29,21 @@ object Server {
   type SSC = AsynchronousServerSocketChannel
   type SC = AsynchronousSocketChannel
 
-  def getChannel(port: Int): AsynchronousServerSocketChannel =
+  def getServerSock(port: Int): AsynchronousServerSocketChannel =
     AsynchronousServerSocketChannel.open().bind(new InetSocketAddress(port))
 
-  def listenForConnections(sSock: SSC, socks: List[SC]) : Unit = {
+  def listenForSocks(sSock: SSC, socks: List[SC]) : Unit = {
 
     println(s"Listening on port ${sSock.getLocalAddress.toString}")
     if (socks.size > 0) println(s"Clients at: ${socks map {_.getLocalAddress}}")
 
-    val newSock = acceptConnection(sSock)
-    newSock onSuccess { case ns => listenForMessages(ns :: socks)}
+    val newSock = acceptSock(sSock)
+    newSock onSuccess { case ns => listenToSocks(ns :: socks)}
 
-    listenForConnections(sSock, Await.result(newSock, Duration.Inf) :: socks )
+    listenForSocks(sSock, Await.result(newSock, Duration.Inf) :: socks )
   }
 
-  def acceptConnection(sSock: SSC): Future[SC] = {
+  def acceptSock(sSock: SSC): Future[SC] = {
     val p = Promise[SC]()
     sSock.accept(null, new CompletionHandler[SC, Void] {
       def completed(sock: SC, att: Void) = {
@@ -53,26 +55,13 @@ object Server {
     p.future
   }
 
-  def listenForMessages(socks: List[SC]): ParSeq[Future[List[Unit]]] =
-//    socks map { s =>
-//      val done = relayOne(s, socks)
-//      Await.result(done, Duration.Inf)
-//    }
-//    Future sequence { socks map { s => relayOne(s, socks) }}
-    socks.par map { s => relayMessage(s, socks) }
-
-
-  def relayMessage(sock: SC, socks: List[SC]): Future[List[Unit]] = {
-    { for {
-      input <- read(sock)
-      dones <- routeInput(input, sock, socks)
-    } yield dones } flatMap { _ => relayMessage(sock, socks) }
-//    for {
-//      input <- read(sock)
-//      dones <- routeInput(input, sock, socks)
-//    } yield dones
-  }
-
+  def listenToSocks(socks: List[SC]): List[Future[List[Unit]]] =
+    socks map { s => listenToSock(s, socks) }
+  
+  def listenToSock(sock: SC, socks: List[SC]) : Future[List[Unit]] =
+    read(sock) flatMap { msg =>
+      relay(msg, sock, socks) flatMap { _ =>
+        listenToSock(sock, socks) } }
 
   def read(sock: SC): Future[Array[Byte]] = {
     val buf = ByteBuffer.allocate(1024) // TODO what happens to this memory allocation?
@@ -88,25 +77,19 @@ object Server {
     p.future
   }
 
-  def routeInput(input: Array[Byte], sock: SC, socks: List[SC]) : Future[List[Unit]] = {
-    if (input.map(_.toChar).mkString.trim == "exit"){ sock.close(); Future.successful(List(())) }
-    else writeToAll(input,sock, socks)
-  }
-
-  def writeToAll(bs: Array[Byte], sock: SC, socks: List[SC]): Future[List[Unit]] = {
-    Future sequence { socks map { sock => writeToOne(bs, sock) } }
-//    val dones = for { sock <- socks }
-//      yield for { done <- writeToOne(bs, sock) }
-//        yield  { done }
-//    Future.sequence { dones }
-  }
+  def relay(msg: Array[Byte], sock: SC, socks: List[SC]): Future[List[Unit]] =
+    if (msg.map(_.toChar).mkString.trim == "exit") {
+      sock.close()
+      Future.successful(List(())) }
+    else Future sequence {
+      socks map { s =>
+        write(msg, s) } }
   
-  def writeToOne(bs: Array[Byte], sock: SC): Future[Unit] = {
-    for {
-      numwrit <- writeOnce(bs, sock)
-      res <- dispatchWrite(numwrit, bs, sock)
-    } yield res
-  }
+  def write(msg: Array[Byte], sock: SC): Future[Unit] =
+    writeOnce(msg, sock) flatMap { numwrit =>
+      if(numwrit == msg.size) Future.successful(())
+      else write(msg.drop(numwrit), sock)
+    }
 
   def writeOnce(bs: Array[Byte], sock: SC): Future[Integer] = {
     val p = Promise[Integer]()
@@ -116,12 +99,27 @@ object Server {
     })
     p.future
   }
-
-  def dispatchWrite(numwrit: Int, bs: Array[Byte], sock: SC): Future[Unit] = {
-    if(numwrit == bs.size) Future.successful(())
-    else writeToOne(bs.drop(numwrit), sock)
-  }
 }
+
+
+//  def send(msg: Array[Byte], sock: SC) : Future[Unit] =
+
+
+//  def routeInput(input: Array[Byte], sock: SC, socks: List[SC]) : Future[List[Unit]] = {
+//    if (input.map(_.toChar).mkString.trim == "exit"){ sock.close(); Future.successful(List(())) }
+//    else writeToAllSocks(input,sock, socks)
+//  }
+//
+//  def getMessage(sock: SC) : Future[Array[Byte]] = read(sock)
+
+//  def relayMessage(sock: SC, socks: List[SC]): Future[List[Unit]] = {
+//    { for {
+//      input <- read(sock)
+//      dones <- routeInput(input, sock, socks)
+//    } yield dones } flatMap { _ => relayMessage(sock, socks) }
+//  }
+
+//  def relayMessage(msg: Array[Byte], socks: List[SC])
 
 
 /* stack trace:
