@@ -6,7 +6,7 @@ import scat.Socket._
 
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.Duration
-import scala.concurrent.{Await, Future}
+import scala.concurrent.{Promise, Await, Future}
 
 /**
  * Author: @aguestuser
@@ -16,9 +16,8 @@ import scala.concurrent.{Await, Future}
 
 object RunServer extends App {
   try {
-    val sSock = getServerSock(args(0).toInt)
-    println(s"Listening on port ${sSock.getLocalAddress}")
-    Server.acceptClients(sSock)
+    Server.acceptClients(getServerSock(args(0).toInt))
+    Await.result(Promise[Unit]().future, Duration.Inf)
   } catch {
     case e: NumberFormatException => throw new NumberFormatException("Port number for scat must be a valid int")
   }
@@ -31,20 +30,18 @@ object Server {
 
   var clients = Set[Client]()
 
-  def acceptClients(sSock: SSC) : Unit = {
-    val cSock = accept(sSock)
-    cSock flatMap { cs =>
-      configClient(cs) flatMap { cl =>
-        listen(cl) } }
+  def acceptClients(sSock: SSC) : Future[Unit] =
+    accept(sSock) flatMap { cs =>
+      configClient(cs) flatMap { cl => listen(cl)}
+      acceptClients(sSock)
+    }
 
-    Await.result(cSock, Duration.Inf)
-    acceptClients(sSock)
-  }
+  //TODO move configClient and getHandle to Client object?
 
   def configClient(cSock: SC) : Future[Client] = {
     getHandle(cSock) map { h =>
       val cl = new Client(cSock,h)
-      synchronized { clients = clients + cl}
+      synchronized { clients = clients + cl }
       println(s"Created new client: \n${cl.info}")
       println(s"${clients.size} total client(s): \n${clients.map{ _.info }.mkString("\n") }")
       cl
@@ -55,29 +52,37 @@ object Server {
     val prompt = "Welcome to scat! Please choose a handle...\n".getBytes
     write(prompt, cSock) flatMap { _ =>
       read(cSock) map { msg =>
-        trimCarriageReturn(msg) } }
+        trimByteArray(msg) }
+    }
   }
 
-  def listen(client: Client): Future[Set[Unit]] =
+  def listen(client: Client): Future[Unit] =
     read(client.sock) flatMap { msg =>
-      relay(msg, client) flatMap { _ =>
-        println(s"Relayed message from ${client.humanHandle}")
-        listen(client)
+      dispatch(msg, client) flatMap { cont =>
+        if (cont) listen(client)
+        else Future.successful(())
       }
     }
 
-  def relay(msg: Array[Byte], sender: Client): Future[Set[Unit]] =
-    if (msg.map(_.toChar).mkString.trim == "exit") {
-      sender.sock.close()
-      synchronized { clients = clients - sender }
-      Future.successful(Set(()))
-    }
-    else Future sequence {
-      (clients - sender) map { cl => write(appendHandle(msg, sender), cl.sock) }
-    }
+  def dispatch(msg: Array[Byte], sender: Client): Future[Boolean] =
+    if (strFromWire(msg) == "exit") close(sender)
+    else relay(msg, sender)
 
+  def close(sender: Client): Future[Boolean] = {
+    sender.sock.close()
+    println(s"Closed connection with ${sender.info}")
+    synchronized { clients = clients - sender }
+    Future.successful(false)
+  }
+
+  def relay(msg: Array[Byte], sender: Client): Future[Boolean] =
+    Future sequence { (clients - sender) map { cl =>
+        write(trimByteArray(appendHandle(msg, sender)), cl.sock)
+      }
+    } flatMap { _ =>
+      println(s"Relayed message from ${sender.humanHandle}")
+      Future.successful(true)
+    }
 
   private def appendHandle(msg: Array[Byte], cl: Client) : Array[Byte] = cl.handle ++ ": ".getBytes ++ msg
-  private def trimCarriageReturn(msg: Array[Byte]): Array[Byte] = msg.takeWhile( _ != (10:Byte))
-
 }

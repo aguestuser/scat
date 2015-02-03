@@ -2,11 +2,12 @@ package scat
 
 import java.net.InetSocketAddress
 import java.nio.channels.AsynchronousSocketChannel
-import Socket._
 
+import scat.Socket._
+
+import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.Duration
-import scala.concurrent.{Await, Future, ExecutionContext}
-import ExecutionContext.Implicits.global
+import scala.concurrent.{Await, Future, Promise}
 
 /**
  * Author: aguestuser
@@ -15,9 +16,12 @@ import ExecutionContext.Implicits.global
  */
 
 object RunClient extends App {
+
   val cSock = getClientSock(args(1).toInt)
   val sAddr = new InetSocketAddress(args(0).toInt)
-  Client.initialize(cSock,sAddr)
+  val kill = Promise[Unit]()
+  Client.initialize(cSock,sAddr, kill)
+  Await.result(kill.future, Duration.Inf)
 }
 
 class Client(val sock: AsynchronousSocketChannel, val handle: Array[Byte]) {
@@ -27,21 +31,35 @@ class Client(val sock: AsynchronousSocketChannel, val handle: Array[Byte]) {
 
 object Client {
 
-  def initialize(cSock: SC, sAddr: SAddr): Future[Unit] = {
-//    val c = connect(cSock, sAddr)
-//    Await.result(c, Duration.Inf)
-//    listen(cSock)
-    val cnxn = connect(cSock, sAddr) map { _ => listen(cSock)}
-    Await.result(cnxn, Duration.Inf )
-  }
+  def initialize(cSock: SC, sAddr: SAddr, kill: Promise[Unit]): Future[Unit] =
+    connect(cSock, sAddr) flatMap { _ => 
+      listenToWire(cSock)
+      listenToUser(cSock, kill)
+    }
 
-  def listen(cSock: SC): Future[Unit] = {
-    val done = read(cSock) map { msg => println(msg.map(_.toChar).mkString) }
-    Await.result(done, Duration.Inf )
-    done flatMap { _ => listen(cSock)}
-  }
+  def listenToWire(cSock: SC): Future[Unit] =
+    read(cSock) flatMap { msg =>
+      print(s"${strFromWire(msg)}\n")
+      listenToWire(cSock)
+    }
 
-  def getUserInput(): Future[Unit]
+  def listenToUser(cSock: SC, kill: Promise[Unit]): Future[Unit] =
+    Future { scala.io.StdIn.readLine().getBytes } flatMap { msg =>
+      dispatch(msg, cSock, kill) flatMap { _ =>
+        listenToUser(cSock, kill)
+      }
+    }
 
-  def
+  def dispatch(msg: Array[Byte], cSock: SC, kill: Promise[Unit]): Future[Unit] =
+    if (strFromWire(msg) == "exit") {
+      write(msg, cSock) flatMap { _ =>
+        cSock.close()
+        println(s"Closed connection with scat server")
+        kill success { () }
+        Future.successful(())
+      }
+    }
+    else write(msg, cSock)
+
+
 }

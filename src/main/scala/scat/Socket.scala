@@ -19,8 +19,11 @@ object Socket {
   type SC = AsynchronousSocketChannel
   type SAddr = InetSocketAddress
 
-  def getServerSock(port: Int): SSC =
-    AsynchronousServerSocketChannel.open().bind(new InetSocketAddress(port))
+  def getServerSock(port: Int): SSC = {
+    val sc = AsynchronousServerSocketChannel.open().bind(new InetSocketAddress(port))
+    println(s"Listening on port $port")
+    sc
+  }
 
   def getClientSock(port: Int): SC =
     AsynchronousSocketChannel.open().bind(new InetSocketAddress(port))
@@ -50,11 +53,11 @@ object Socket {
   }
 
   def read(cSock: SC): Future[Array[Byte]] = {
-    val buf = ByteBuffer.allocate(1024) // TODO what happens to this memory allocation?
+    val buf = ByteBuffer.allocate(1024)
     val p = Promise[Array[Byte]]()
     cSock.read(buf, null, new CompletionHandler[Integer, Void] {
       def completed(numRead: Integer, att: Void) = {
-        println(s"Read $numRead bytes")
+        //println(s"Read $numRead bytes") TODO add verbose mode?
         buf.flip()
         p success { buf.array() }
       }
@@ -68,15 +71,18 @@ object Socket {
       if (numwrit == msg.size) Future.successful(())
       else write(msg.drop(numwrit), receiver)
     }
-  // TODO replace drop with slices of the array? (drop will run in O(n^2) where n is bytes being dropped)
-
+    // TODO replace drop with slices of the array? (drop will run in O(n^2) where n is bytes being dropped)
 
   private def writeOnce(bs: Array[Byte], receiver: SC): Future[Integer] = {
     val p = Promise[Integer]()
     receiver.write(ByteBuffer.wrap(bs), null, new CompletionHandler[Integer, Void] {
-      def completed(numwrit: Integer, att: Void) = { println(s"Wrote $numwrit bytes"); p success { numwrit } }
+      def completed(numwrit: Integer, att: Void) = { /*println(s"Wrote $numwrit bytes");*/ p success { numwrit } }
       def failed(e: Throwable, att: Void) = p failure { e }
     })
     p.future
   }
+
+  def strFromWire(msg: Array[Byte]): String = trimByteArray(msg).map(_.toChar).mkString.trim
+  def trimByteArray(msg: Array[Byte]): Array[Byte] = msg.takeWhile(!Set(10:Byte, 13:Byte, 0:Byte).contains(_))
+
 }
