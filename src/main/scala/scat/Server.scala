@@ -18,38 +18,82 @@ import scala.collection.concurrent.{TrieMap => CMap}
 
 object RunServer extends App {
   try {
-    val server = new Server(getServerSock(args(0).toInt))
-    server.acceptClients
-    Await.result(server.kill.future, Duration.Inf)
+    val server = new Server
+    server.acceptClients(getServerSock(args(0).toInt))
+    Await.result(Promise[Unit]().future, Duration.Inf)
   } catch {
     case e: NumberFormatException => throw new NumberFormatException("Port number for scat must be a valid int")
   }
 }
 
 class Server(
-              val sSock: AsynchronousServerSocketChannel,
               val clients: CMap[Client,Boolean] = CMap[Client,Boolean](),
-              val logs: CMap[Date,String] = CMap[Date,String](),
-              val kill: Promise[Future[Unit]]  = Promise[Future[Unit]]()
-              ) extends Logger with ClientManager {
+              val logs: CMap[Date,String] = CMap[Date,String]()
+              ) {
 
   type SSC = AsynchronousServerSocketChannel
   type SC = AsynchronousSocketChannel
 
-  def acceptClients: Future[Unit] =
+  def acceptClients(sSock: SSC) : Future[Unit] =
     accept(sSock) flatMap { cs =>
-
-      log(this, new Date(), s"Client connection received from ${cs.getRemoteAddress}")
-
-      configClient(this, cs) flatMap { cl =>
-        addClient(this, cl) flatMap { _ =>
-          listen(cl) } }
-
-      acceptClients
+      configClient(cs) flatMap { cl => listen(cl)}
+      acceptClients(sSock)
     }
 
+  //TODO move to ClientManager trait?
+
+  def configClient(cSock: SC) : Future[Client] = {
+    getHandle(cSock) flatMap { h =>
+      createClient(cSock, h) flatMap { cl =>
+        log(new Date(), s"Created new client: \n${cl.info}\n" +
+          s"${clients.size} total client(s): \n" +
+          s"${clients.keySet.map{ _.info }.mkString("\n") }") map { _ =>
+          cl
+        }
+      }
+    }
+  }
+
+  def getHandle(cSock: SC): Future[Array[Byte]] = {
+    val prompt = "Welcome to scat! Please choose a handle...\n".getBytes
+    write(prompt, cSock) flatMap { _ =>
+      read(cSock) map { msg =>
+        trimByteArray(msg) }
+    }
+  }
+
+  def createClient(cSock: SC, handle: Array[Byte]) : Future[Client] =
+    Future {
+      val cl = new Client(cSock,handle)
+      clients putIfAbsent(cl, true)
+      cl
+    }
+
+  // TODO move to Logger Trait
+
+  def log(now: Date, msg: String) : Future[Unit] = {
+    logs putIfAbsent(now,msg) match {
+      case None => // if no member of the hash map had that key
+        println(msg)
+        Future.successful(())
+      case Some(str) => // if some member of the hash map had that key
+        log(now,msg)
+    }
+  }
+
+  def getLogs(num: Int): Vector[String] = {
+//    res
+//    val res = logs.keySet.toVector
+//    println(s"YO! ${logs.keySet.toVector} YO???")
+//    res
+    logs.keySet.toVector.sortBy(_.getTime).slice(0, logs.keys.size) map { logs.get(_).get }
+  }
+
+
+  //TODO keep this here!
+
   def listen(client: Client): Future[Unit] =
-    read(client.cSock) flatMap { msg =>
+    read(client.sock) flatMap { msg =>
       dispatch(msg, client) flatMap { cont =>
         if (cont) listen(client)
         else Future.successful(())
@@ -61,28 +105,20 @@ class Server(
     else relay(msg, sender)
 
   def close(sender: Client): Future[Boolean] = {
-    sender.cSock.close()
-    log(this, new Date(), s"Closed connection with ${sender.info}")
+    sender.sock.close()
+    println(s"Closed connection with ${sender.info}")
     clients - sender
     Future.successful(false)
   }
 
   def relay(msg: Array[Byte], sender: Client): Future[Boolean] =
-    Future sequence { ( clients.keySet - sender) map { cl =>
-        write(trimByteArray(appendHandle(msg, sender)), cl.cSock)
+    Future sequence { ( clients.keys.toSet - sender) map { cl =>
+        write(trimByteArray(appendHandle(msg, sender)), cl.sock)
       }
     } flatMap { _ =>
-      log(this, new Date(), s"Relayed message from ${sender.humanHandle}")
+      println(s"Relayed message from ${sender.humanHandle}")
       Future.successful(true)
     }
 
-  def exit: Future[Unit] = {
-    clients.keySet map { _.cSock.close()}
-    sSock.close()
-    kill success {Future.successful(())}
-    Future.successful(())
-  }
-
-  private def appendHandle(msg: Array[Byte], cl: Client) : Array[Byte] = cl.handle ++ ": ".getBytes ++ msg
-
+  def appendHandle(msg: Array[Byte], cl: Client) : Array[Byte] = cl.handle ++ ": ".getBytes ++ msg
 }
