@@ -113,12 +113,12 @@ class Server(
 
   def relay(msg: Array[Byte], sender: Client): Future[Boolean] =
     Future sequence { ( clients.keys.toSet - sender) map { cl =>
-        write(trimByteArray(appendHandle(msg, sender)), cl.sock)
+        write(trimByteArray(format(msg, sender)), cl.sock)
       }
     } flatMap { _ =>
       println(s"Relayed message from ${sender.humanHandle}")
       Future.successful(true)
     }
 
-  def appendHandle(msg: Array[Byte], cl: Client) : Array[Byte] = cl.handle ++ ": ".getBytes ++ msg
+  def format(msg: Array[Byte], cl: Client) : Array[Byte] = cl.handle ++ ": ".getBytes ++ msg ++ "\n".getBytes
 }
