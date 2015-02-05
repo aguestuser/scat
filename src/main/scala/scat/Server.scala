@@ -1,12 +1,14 @@
 package scat
 
 import java.nio.channels._
+import java.util.Date
 
 import scat.Socket._
 
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.Duration
-import scala.concurrent.{Promise, Await, Future}
+import scala.concurrent.{Await, Future, Promise}
+import scala.collection.concurrent.{TrieMap => CMap}
 
 /**
  * Author: @aguestuser
@@ -16,19 +18,21 @@ import scala.concurrent.{Promise, Await, Future}
 
 object RunServer extends App {
   try {
-    Server.acceptClients(getServerSock(args(0).toInt))
+    val server = new Server
+    server.acceptClients(getServerSock(args(0).toInt))
     Await.result(Promise[Unit]().future, Duration.Inf)
   } catch {
     case e: NumberFormatException => throw new NumberFormatException("Port number for scat must be a valid int")
   }
 }
 
-object Server {
+class Server(
+              val clients: CMap[Client,Boolean] = CMap[Client,Boolean](),
+              val logs: CMap[Date,String] = CMap[Date,String]()
+              ) {
 
   type SSC = AsynchronousServerSocketChannel
   type SC = AsynchronousSocketChannel
-
-  var clients = Set[Client]()
 
   def acceptClients(sSock: SSC) : Future[Unit] =
     accept(sSock) flatMap { cs =>
@@ -36,15 +40,17 @@ object Server {
       acceptClients(sSock)
     }
 
-  //TODO move configClient and getHandle to Client object?
+  //TODO move to ClientManager trait?
 
   def configClient(cSock: SC) : Future[Client] = {
-    getHandle(cSock) map { h =>
-      val cl = new Client(cSock,h)
-      synchronized { clients = clients + cl }
-      println(s"Created new client: \n${cl.info}")
-      println(s"${clients.size} total client(s): \n${clients.map{ _.info }.mkString("\n") }")
-      cl
+    getHandle(cSock) flatMap { h =>
+      createClient(cSock, h) flatMap { cl =>
+        log(new Date(), s"Created new client: \n${cl.info}\n" +
+          s"${clients.size} total client(s): \n" +
+          s"${clients.keySet.map{ _.info }.mkString("\n") }") map { _ =>
+          cl
+        }
+      }
     }
   }
 
@@ -55,6 +61,36 @@ object Server {
         trimByteArray(msg) }
     }
   }
+
+  def createClient(cSock: SC, handle: Array[Byte]) : Future[Client] =
+    Future {
+      val cl = new Client(cSock,handle)
+      clients putIfAbsent(cl, true)
+      cl
+    }
+
+  // TODO move to Logger Trait
+
+  def log(now: Date, msg: String) : Future[Unit] = {
+    logs putIfAbsent(now,msg) match {
+      case None => // if no member of the hash map had that key
+        println(msg)
+        Future.successful(())
+      case Some(str) => // if some member of the hash map had that key
+        log(now,msg)
+    }
+  }
+
+  def getLogs(num: Int): Vector[String] = {
+//    res
+//    val res = logs.keySet.toVector
+//    println(s"YO! ${logs.keySet.toVector} YO???")
+//    res
+    logs.keySet.toVector.sortBy(_.getTime).slice(0, logs.keys.size) map { logs.get(_).get }
+  }
+
+
+  //TODO keep this here!
 
   def listen(client: Client): Future[Unit] =
     read(client.sock) flatMap { msg =>
@@ -71,12 +107,12 @@ object Server {
   def close(sender: Client): Future[Boolean] = {
     sender.sock.close()
     println(s"Closed connection with ${sender.info}")
-    synchronized { clients = clients - sender }
+    clients - sender
     Future.successful(false)
   }
 
   def relay(msg: Array[Byte], sender: Client): Future[Boolean] =
-    Future sequence { (clients - sender) map { cl =>
+    Future sequence { ( clients.keys.toSet - sender) map { cl =>
         write(trimByteArray(appendHandle(msg, sender)), cl.sock)
       }
     } flatMap { _ =>
@@ -84,5 +120,5 @@ object Server {
       Future.successful(true)
     }
 
-  private def appendHandle(msg: Array[Byte], cl: Client) : Array[Byte] = cl.handle ++ ": ".getBytes ++ msg
+  def appendHandle(msg: Array[Byte], cl: Client) : Array[Byte] = cl.handle ++ ": ".getBytes ++ msg
 }
