@@ -19,38 +19,43 @@ object RunClient extends App {
 
   val cSock = getClientSock(args(1).toInt)
   val sAddr = new InetSocketAddress(args(0).toInt)
-  val kill = Promise[Unit]()
-  Client.initialize(cSock,sAddr, kill)
-  Await.result(kill.future, Duration.Inf)
+  val client = new Client(cSock)
+  client.connectTo(sAddr)
+  Await.result(client.kill.future, Duration.Inf)
 }
 
-class Client(val sock: AsynchronousSocketChannel, val handle: Array[Byte]) {
-  val humanHandle = handle.map{ _.toChar }.mkString
-  val info = humanHandle + " @ " + sock.getRemoteAddress.toString
-}
+class Client(
+              val cSock: AsynchronousSocketChannel,
+              val handle: Array[Byte] = Array[Byte](),
+              val kill: Promise[Unit] = Promise[Unit]()) {
 
-object Client {
+  val humanHandle = handle match {
+    case Array() => "no_name"
+    case good => good.map{ _.toChar }.mkString
+  }
+  val info = humanHandle + " @ " + cSock.getRemoteAddress.toString
 
-  def initialize(cSock: SC, sAddr: SAddr, kill: Promise[Unit]): Future[Unit] =
-    connect(cSock, sAddr) flatMap { _ => 
-      listenToWire(cSock)
-      listenToUser(cSock, kill)
+  def connectTo(sAddr: SAddr): Future[Unit] =
+    connect(cSock, sAddr) flatMap { _ =>
+      listenToWire
+      listenToUser
+      Future.successful(())
     }
 
-  def listenToWire(cSock: SC): Future[Unit] =
+  def listenToWire: Future[Unit] =
     read(cSock) flatMap { msg =>
       print(s"${strFromWire(msg)}\n")
-      listenToWire(cSock)
+      listenToWire
     }
 
-  def listenToUser(cSock: SC, kill: Promise[Unit]): Future[Unit] =
+  def listenToUser: Future[Unit] =
     Future { scala.io.StdIn.readLine().getBytes } flatMap { msg =>
-      dispatch(msg, cSock, kill) flatMap { _ =>
-        listenToUser(cSock, kill)
+      dispatch(msg) flatMap { _ =>
+        listenToUser
       }
     }
 
-  def dispatch(msg: Array[Byte], cSock: SC, kill: Promise[Unit]): Future[Unit] =
+  def dispatch(msg: Array[Byte]): Future[Unit] =
     if (strFromWire(msg) == "exit") {
       write(msg, cSock) flatMap { _ =>
         cSock.close()
@@ -60,6 +65,5 @@ object Client {
       }
     }
     else write(msg, cSock)
-
 
 }
