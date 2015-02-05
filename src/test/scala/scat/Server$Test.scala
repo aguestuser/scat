@@ -17,38 +17,34 @@ class Server$Test extends org.specs2.mutable.Specification {
 
   "#acceptClients" should {
 
-    lazy val server = new Server(getServerSock(2000))
+    lazy val sSock: SSC = Socket.getServerSock(2000)
     lazy val sAddr: SAddr = new InetSocketAddress(2000)
+    lazy val cSock1: SC = Socket.getClientSock(2001)
+    lazy val cSock2: SC = Socket.getClientSock(2001)
+    lazy val kill: Promise[Unit] = Promise[Unit]()
 
-    lazy val c1 = new Client(getClientSock(2001))
-    lazy val c2 = new Client(getClientSock(2002))
+    "accept a client" in {
 
-    "accept a client connection" in {
+      val server = new Server
 
-      server.acceptClients
-      Await.ready(c1.connectTo(sAddr), Duration.Inf)
-//      server.exit
+      server.acceptClients(sSock)
+      Await.ready(Future{()}, Duration(200,"millis"))
 
-      server.getLogs(server, 1).mkString ===
-        "Client connection received from /0:0:0:0:0:0:0:1:2001"
+      initialize(cSock1, sAddr, kill)
+      write("austin".getBytes, cSock1)
+      Await.ready(Future{()}, Duration(200,"millis"))
 
-    }
-
-    "configure a client" in {
-
-      server.acceptClients
-      Await.ready(c1.connectTo(sAddr), Duration.Inf)
-      Await.ready(c1.dispatch("austin".getBytes), Duration.Inf)
-      Await.ready(Future(()), Duration(1500,"millis"))
-      server.exit
-
-      server.getLogs(server, 1).mkString ===
+      server.getLogs(1).mkString ===
         "Created new client: \n" +
-          "austin @ /0:0:0:0:0:0:0:1:2001\n" +
-          "1 total client(s): \n" +
-          "austin @ /0:0:0:0:0:0:0:1:2001"
-      }
+        "austin @ /0:0:0:0:0:0:0:1:2001\n" +
+        "1 total client(s): \n" +
+        "austin @ /0:0:0:0:0:0:0:1:2001"
+
+      //TODO add setup/teardown to open and close sockets
     }
+
+  }
+
 
 //  trait server extends Before with After {
 //    val kill = Promise[Unit]()

@@ -31,7 +31,10 @@ object Socket {
   def accept(sSock: SSC): Future[SC] = {
     val p = Promise[SC]()
     sSock.accept(null, new CompletionHandler[SC, Void] {
-      def completed(cSock: SC, att: Void) = p success { cSock }
+      def completed(client: SC, att: Void) = {
+        println(s"Client connection received from ${client.getRemoteAddress}")
+        p success { client }
+      }
       def failed(e: Throwable, att: Void) = p failure { e }
     })
     p.future
