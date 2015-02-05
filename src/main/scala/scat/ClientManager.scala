@@ -1,40 +1,39 @@
-//package scat
-//
-//import java.util.Date
-//
-//import scat.Socket._
-//import scat.Server._
-//import scala.concurrent.Future
-//
-///**
-// * Created by aguestuser on 2/4/15.
-// */
-//trait ClientManager {
-//
-//  def configClient(cSock: SC, clients: Client) : Future[Client] = {
-//    getHandle(cSock) flatMap { h =>
-//      createClient(cSock, h) flatMap { cl =>
-//        scat.Server.log(new Date(), s"Created new client: \n${cl.info}\n" +
-//          s"${this.clients.size} total client(s): \n" +
-//          s"${clients.keys.map{ _.info }.mkString("\n") }") map { _ =>
-//          cl
-//        }
-//      }
-//    }
-//  }
-//
-//  def getHandle(cSock: SC): Future[Array[Byte]] = {
-//    val prompt = "Welcome to scat! Please choose a handle...\n".getBytes
-//    write(prompt, cSock) flatMap { _ =>
-//      read(cSock) map { msg =>
-//        trimByteArray(msg) }
-//    }
-//  }
-//
-//  def createClient(cSock: SC, handle: Array[Byte]) : Future[Client] =
-//    Future {
-//      val cl = new Client(cSock,handle)
-//      clients putIfAbsent(cl, true)
-//      cl
-//    }
-//}
+package scat
+
+import java.util.Date
+
+import scat.Socket._
+
+import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.Future
+
+/**
+* Author: @aguestuser
+* Date: 2/4/15
+* License: GPLv2
+*/
+
+trait ClientManager extends Logger {
+
+  def configClient(server: Server, cSock: SC) : Future[Client] =
+    getHandle(cSock) flatMap { h =>
+      val cl = new Client(cSock,h)
+
+      Future.successful(cl)
+    }
+
+  def addClient(server: Server, client: Client) : Future[Unit] =
+    Future{
+      server.clients putIfAbsent(client, true)
+    } flatMap { _ =>
+      log(server, new Date(), s"Created new client: \n${client.info}\n" +
+        s"${server.clients.size} total client(s): \n" +
+        s"${server.clients.keySet.map{ _.info }.mkString("\n") }")
+    }
+
+  def getHandle(cSock: SC): Future[Array[Byte]] =
+    write("Welcome to scat! Please choose a handle...\n".getBytes, cSock) flatMap { _ =>
+      read(cSock) map { msg =>
+        trimByteArray(msg) } }
+
+}
