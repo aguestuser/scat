@@ -1,9 +1,10 @@
 package scat
 
-import java.util.Date
+import java.nio.channels.{AsynchronousSocketChannel => SC}
 
 import scat.Socket._
 
+import scala.collection.concurrent.{TrieMap => CMap}
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
 
@@ -13,27 +14,36 @@ import scala.concurrent.Future
 * License: GPLv2
 */
 
+
+
 trait ClientManager extends Logger {
 
-  def configClient(server: Server, cSock: SC) : Future[Client] =
-    getHandle(cSock) flatMap { h =>
-      val cl = new Client(cSock,h)
+  def shakeHands(sock: SC): Future[Unit] = {
+    read(sock) flatMap { msg =>
 
-      Future.successful(cl)
     }
+  }
 
-  def addClient(server: Server, client: Client) : Future[Unit] =
-    Future{
-      server.clients putIfAbsent(client, true)
-    } flatMap { _ =>
-      log(server, new Date(), s"Created new client: \n${client.info}\n" +
-        s"${server.clients.size} total client(s): \n" +
-        s"${server.clients.keySet.map{ _.info }.mkString("\n") }")
-    }
+  def parseHandShake(bs: Array[Byte]) = {
+    val (flag, rest) = bs.splitAt(4) match { case (h,t) => (sum(h),t) }
+
+
+  }
+
+  def parseOne(bs: Array[Byte], num: Int)
+
+
+
+  def addClient(client: Client) : Future[Unit] =
+    Future { clients putIfAbsent(client, true)}
 
   def getHandle(cSock: SC): Future[Array[Byte]] =
     write("Welcome to scat! Please choose a handle...\n".getBytes, cSock) flatMap { _ =>
       read(cSock) map { msg =>
         trimByteArray(msg) } }
+
+
+  def sum(bs: Array[Byte]) : Int = (0 /: bs)((sum,b) => 256*sum + (b & 0xff))
+  def sum(bs: List[Byte]) : Int = (0 /: bs)((sum,b) => 256*sum + (b & 0xff))
 
 }

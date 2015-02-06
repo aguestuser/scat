@@ -1,6 +1,6 @@
 package scat
 
-import java.nio.channels._
+import java.nio.channels.{ AsynchronousSocketChannel => SC, AsynchronousServerSocketChannel => SSC }
 import java.util.Date
 
 import scat.Socket._
@@ -17,36 +17,29 @@ import scala.collection.concurrent.{TrieMap => CMap}
  */
 
 object RunServer extends App {
+  import scat.Server._
   try {
-    val server = new Server(getServerSock(args(0).toInt))
-    server.acceptClients
-    Await.result(server.kill.future, Duration.Inf)
+    val kill = Promise[Unit]()
+    acceptClients(getServerSock(args(0).toInt)), kill)
+    Await.result(kill.future, Duration.Inf)
   } catch {
     case e: NumberFormatException => throw new NumberFormatException("Port number for scat must be a valid int")
   }
 }
 
-class Server(
-              val sSock: AsynchronousServerSocketChannel,
-              val clients: CMap[Client,Boolean] = CMap[Client,Boolean](),
-              val logs: CMap[Date,String] = CMap[Date,String](),
-              val kill: Promise[Future[Unit]]  = Promise[Future[Unit]]()
-              ) extends Logger with ClientManager {
+object Server extends Logger with ClientManager {
+  val clients: CMap[Client,Boolean] = CMap[Client,Boolean]()
+  val logs: CMap[Date,String] = CMap[Date,String]()
+  val kill: Promise[Future[Unit]]  = Promise[Future[Unit]]()
 
-  type SSC = AsynchronousServerSocketChannel
-  type SC = AsynchronousSocketChannel
-
-  def acceptClients: Future[Unit] =
-    accept(sSock) flatMap { cs =>
-
-      log(this, new Date(), s"Client connection received from ${cs.getRemoteAddress}")
-
-      configClient(this, cs) flatMap { cl =>
-        addClient(this, cl) flatMap { _ =>
-          listen(cl) } }
-
-      acceptClients
+  def acceptClients(sSock: SSC, kill: Promise[Unit]): Future[Unit] =
+    accept(sSock) flatMap { sock =>
+      logConnection(logs, sock)
+      Future { clients putIfAbsent(InitClient(sock), true) }
+      acceptClients(sSock,kill)
     }
+
+
 
   def listen(client: Client): Future[Unit] =
     read(client.cSock) flatMap { msg =>
@@ -83,6 +76,5 @@ class Server(
     Future.successful(())
   }
 
-  private def appendHandle(msg: Array[Byte], cl: Client) : Array[Byte] = cl.handle ++ ": ".getBytes ++ msg
 
 }

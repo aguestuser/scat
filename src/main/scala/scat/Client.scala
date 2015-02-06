@@ -1,7 +1,6 @@
 package scat
 
 import java.net.InetSocketAddress
-import java.nio.channels.AsynchronousSocketChannel
 
 import scat.Socket._
 
@@ -17,53 +16,84 @@ import scala.concurrent.{Await, Future, Promise}
 
 object RunClient extends App {
 
-  val cSock = getClientSock(args(1).toInt)
-  val sAddr = new InetSocketAddress(args(0).toInt)
-  val client = new Client(cSock)
-  client.connectTo(sAddr)
-  Await.result(client.kill.future, Duration.Inf)
+  import scat.Client._
+
+  val (sAddr, cSock) = (new InetSocketAddress(args(0).toInt), getClientSock(args(1).toInt))
+  val kill = Promise[Unit]()
+
+  config(PreClient(cSock)) flatMap { ic =>
+    connect(ic, sAddr, kill) }
+
+  Await.result(kill.future, Duration.Inf)
 }
 
-class Client(
-              val cSock: AsynchronousSocketChannel,
-              val handle: Array[Byte] = Array[Byte](),
-              val kill: Promise[Unit] = Promise[Unit]()) {
+trait Client
+case class PreClient(sock: SC) extends Client
+case class InitClient(sock: SC, handle: Array[Byte]) extends Client
 
-  val humanHandle = handle match {
-    case Array() => "no_name"
-    case good => good.map{ _.toChar }.mkString
-  }
-  val info = humanHandle + " @ " + cSock.getRemoteAddress.toString
+object Client {
 
-  def connectTo(sAddr: SAddr): Future[Unit] =
-    connect(cSock, sAddr) flatMap { _ =>
-      listenToWire
-      listenToUser
-      Future.successful(())
-    }
+  def config(cl: Client): Future[Client] =
+    cl match { case PreClient(sock) =>
+      getHandle(cl) flatMap { h =>
+        Future.successful(InitClient(sock, h)) } }
 
-  def listenToWire: Future[Unit] =
-    read(cSock) flatMap { msg =>
-      print(s"${strFromWire(msg)}\n")
-      listenToWire
-    }
+  def getHandle(cl: Client): Future[Array[Byte]] =
+    cl match { case PreClient(_) =>
+      Future {
+        scala.io.StdIn.readLine("Welcome to scat! Please choose a handle...\n").getBytes } }
 
-  def listenToUser: Future[Unit] =
-    Future { scala.io.StdIn.readLine().getBytes } flatMap { msg =>
-      dispatch(msg) flatMap { _ =>
-        listenToUser
-      }
-    }
+  def connect(cl: Client, sAddr: SAddr, kill: Promise[Unit]): Future[Unit] =
+    cl match { case InitClient(sock, _) =>
+      Socket.connect(sock, sAddr) flatMap { _ =>
+        listenToWire(cl)
+        listenToUser(cl, kill)
+        Future.successful(()) } }
 
-  def dispatch(msg: Array[Byte]): Future[Unit] =
-    if (strFromWire(msg) == "exit") {
-      write(msg, cSock) flatMap { _ =>
-        cSock.close()
-        println(s"Closed connection with scat server")
-        kill success { () }
-        Future.successful(())
-      }
-    }
-    else write(msg, cSock)
+  def listenToWire(cl: Client): Future[Unit] =
+    cl match { case InitClient(sock, handle) =>
+      read(sock) flatMap { msg =>
+        print(s"${strFromWire(msg)}\n")
+        listenToWire(cl) } }
+
+  def listenToUser(cl: Client, kill: Promise[Unit]): Future[Unit] =
+    cl match { case InitClient(sock, handle) =>
+      Future { scala.io.StdIn.readLine().getBytes } flatMap { msg =>
+        dispatch(cl, msg) flatMap { cont =>
+          if (cont) {
+            listenToUser(cl, kill)
+            Future.successful(()) }
+          else {
+            kill success {()}
+            Future.successful(()) } } } }
+
+
+  def dispatch(cl: Client, msg: Array[Byte]): Future[Boolean] =
+    cl match { case InitClient(sock, handle) =>
+      if (strFromWire(msg) == "exit") {
+        Future {
+          sock.close()
+          println(s"Closed connection with scat server") } flatMap { _ =>
+            Future.successful(false) } }
+      else {
+        write(format(cl, msg), sock)
+        Future.successful(true) } }
+
+  def humanHandle(cl: Client): String =
+    cl match { case InitClient(sock, handle) => handle.map{ _.toChar }.mkString }
+
+  def info(cl: Client): String =
+    cl match { case InitClient(sock, handle) =>
+      humanHandle(cl) + " @ " + sock.getRemoteAddress.toString }
+
+  private def format(cl: Client, msg: Array[Byte]) : Array[Byte] =
+    cl match { case InitClient(sock, handle) =>
+      handle ++ ": ".getBytes ++ msg } // ++ "\n".getBytes
 
 }
+
+//object ClientAccessor {
+//  val humanHandle:String = handle.map{ _.toChar }.mkString
+//  val info = humanHandle + " @ " + sock.getRemoteAddress.toString
+//
+//}
