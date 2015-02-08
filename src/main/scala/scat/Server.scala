@@ -1,124 +1,101 @@
 package scat
 
-import java.nio.channels._
+import java.nio.channels.{AsynchronousServerSocketChannel => SSC, AsynchronousSocketChannel => SC}
 import java.util.Date
 
 import scat.Socket._
 
+import scala.collection.concurrent.{TrieMap => CMap}
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.Duration
 import scala.concurrent.{Await, Future, Promise}
-import scala.collection.concurrent.{TrieMap => CMap}
 
 /**
  * Author: @aguestuser
- * Date: 1/31/15
+ * Date: 1/31/15 - 2/6/15
  * License: GPLv2
  */
 
 object RunServer extends App {
+  import scat.Server._
   try {
-    val server = new Server
-    server.acceptClients(getServerSock(args(0).toInt))
-    Await.result(Promise[Unit]().future, Duration.Inf)
+    val kill = Promise[Unit]()
+    val server = Server(getServerSock(args(0).toInt), CMap[RmtClient,Boolean](), CMap[Date,String](), kill)
+    run(server)
+    Await.result(kill.future, Duration.Inf)
   } catch {
     case e: NumberFormatException => throw new NumberFormatException("Port number for scat must be a valid int")
   }
 }
 
-class Server(
-              val clients: CMap[Client,Boolean] = CMap[Client,Boolean](),
-              val logs: CMap[Date,String] = CMap[Date,String]()
-              ) {
+case class Server(sSock: SSC,
+                  clients: CMap[RmtClient,Boolean],
+                  logs: CMap[Date,String],
+                  kill: Promise[Unit])
 
-  type SSC = AsynchronousServerSocketChannel
-  type SC = AsynchronousSocketChannel
+object Server extends Logger with ClientManager {
 
-  def acceptClients(sSock: SSC) : Future[Unit] =
-    accept(sSock) flatMap { cs =>
-      configClient(cs) flatMap { cl => listen(cl)}
-      acceptClients(sSock)
-    }
+//  val clients: CMap[Client,Boolean] = CMap[Client,Boolean]()
+//  val logs: CMap[Date,String] = CMap[Date,String]()
+//  val kill: Promise[Future[Unit]]  = Promise[Future[Unit]]()
 
-  //TODO move to ClientManager trait?
+  def run(server: Server): Future[Unit] = {
+    acceptClients(server)
+    listenForKill(server) }
 
-  def configClient(cSock: SC) : Future[Client] = {
-    getHandle(cSock) flatMap { h =>
-      createClient(cSock, h) flatMap { cl =>
-        log(new Date(), s"Created new client: \n${cl.info}\n" +
-          s"${clients.size} total client(s): \n" +
-          s"${clients.keySet.map{ _.info }.mkString("\n") }") map { _ =>
-          cl
-        }
-      }
-    }
+  def acceptClients(server: Server): Future[Unit] = server match {
+    case Server(sSock, clients,logs,k) =>
+      accept(sSock) flatMap { sock =>
+        logConnection(server.logs, sock)
+        shakeHands(sock) flatMap { client =>
+          addClient(clients, client) flatMap { c =>
+            listen(server, client)
+            logNewClient(server.logs, server.clients, c)} }
+        acceptClients(server) } }
+
+  def listen(server: Server, cl: RmtClient): Future[Unit] =
+    read(cl.sock) flatMap { msg =>
+      dispatch(server, cl, msg) flatMap { cont =>
+        if (cont) listen(server, cl)
+        else Future.successful(()) } }
+
+  def dispatch(server: Server, cl: RmtClient, msg: Array[Byte]): Future[Boolean] =
+    if (strFromWire(msg) == "exit") close(server, cl)
+    else relay(server, cl, msg)
+
+  def close(server: Server, cl: RmtClient): Future[Boolean] = {
+    server.clients remove (cl,true)
+    logClose(server.logs, cl)
+    cl.sock.close()
+    Future successful { false }
   }
+//    Future successful {
+//      cl.sock.close()
+//      server.clients remove (cl,true)
+//      logClose(server.logs, cl)
+//      false }
 
-  def getHandle(cSock: SC): Future[Array[Byte]] = {
-    val prompt = "Welcome to scat! Please choose a handle...\n".getBytes
-    write(prompt, cSock) flatMap { _ =>
-      read(cSock) map { msg =>
-        trimByteArray(msg) }
-    }
-  }
-
-  def createClient(cSock: SC, handle: Array[Byte]) : Future[Client] =
-    Future {
-      val cl = new Client(cSock,handle)
-      clients putIfAbsent(cl, true)
-      cl
-    }
-
-  // TODO move to Logger Trait
-
-  def log(now: Date, msg: String) : Future[Unit] = {
-    logs putIfAbsent(now,msg) match {
-      case None => // if no member of the hash map had that key
-        println(msg)
-        Future.successful(())
-      case Some(str) => // if some member of the hash map had that key
-        log(now,msg)
-    }
-  }
-
-  def getLogs(num: Int): Vector[String] = {
-//    res
-//    val res = logs.keySet.toVector
-//    println(s"YO! ${logs.keySet.toVector} YO???")
-//    res
-    logs.keySet.toVector.sortBy(_.getTime).slice(0, logs.keys.size) map { logs.get(_).get }
-  }
-
-
-  //TODO keep this here!
-
-  def listen(client: Client): Future[Unit] =
-    read(client.sock) flatMap { msg =>
-      dispatch(msg, client) flatMap { cont =>
-        if (cont) listen(client)
-        else Future.successful(())
-      }
-    }
-
-  def dispatch(msg: Array[Byte], sender: Client): Future[Boolean] =
-    if (strFromWire(msg) == "exit") close(sender)
-    else relay(msg, sender)
-
-  def close(sender: Client): Future[Boolean] = {
-    sender.sock.close()
-    println(s"Closed connection with ${sender.info}")
-    clients - sender
-    Future.successful(false)
-  }
-
-  def relay(msg: Array[Byte], sender: Client): Future[Boolean] =
-    Future sequence { ( clients.keys.toSet - sender) map { cl =>
-        write(trimByteArray(format(msg, sender)), cl.sock)
-      }
+  def relay(server: Server, cl: RmtClient, msg: Array[Byte]): Future[Boolean] =
+    Future sequence {
+      (server.clients.keySet - cl) map { c => write(c.sock,msg) }
     } flatMap { _ =>
-      println(s"Relayed message from ${sender.humanHandle}")
-      Future.successful(true)
-    }
+      logRelay(server.logs, cl, msg)
+      Future successful { true } }
 
-  def format(msg: Array[Byte], cl: Client) : Array[Byte] = cl.handle ++ ": ".getBytes ++ msg ++ "\n".getBytes
+  def listenForKill(server: Server): Future[Unit] =
+    Future {
+      scala.io.StdIn.readLine()
+    } flatMap { msg =>
+      if (msg == "exit") doKill(server)
+      else listenForKill(server) }
+
+  def doKill(server: Server): Future[Unit] =
+    Future sequence {
+      server.clients.keySet.map { c => write(c.sock, "exit".getBytes) }
+    } flatMap { _ =>
+      server.clients.keySet map { cl => cl.sock.close() }
+      server.sSock.close()
+      server.kill success { Future successful { () } }
+      Future successful { () } }
+
 }

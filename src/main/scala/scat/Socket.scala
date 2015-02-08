@@ -66,16 +66,16 @@ object Socket {
     p.future
   }
 
-  def write(msg: Array[Byte], receiver: SC): Future[Unit] =
-    writeOnce(msg, receiver) flatMap { numwrit =>
+  def write(sock: SC, msg: Array[Byte]): Future[Unit] =
+    writeOnce(sock, msg) flatMap { numwrit =>
       if (numwrit == msg.size) Future.successful(())
-      else write(msg.drop(numwrit), receiver)
+      else write(sock, msg.drop(numwrit))
     }
     // TODO replace drop with slices of the array? (drop will run in O(n^2) where n is bytes being dropped)
 
-  private def writeOnce(bs: Array[Byte], receiver: SC): Future[Integer] = {
+  private def writeOnce(sock: SC, bs: Array[Byte]): Future[Integer] = {
     val p = Promise[Integer]()
-    receiver.write(ByteBuffer.wrap(bs), null, new CompletionHandler[Integer, Void] {
+    sock.write(ByteBuffer.wrap(bs), null, new CompletionHandler[Integer, Void] {
       def completed(numwrit: Integer, att: Void) = { /*println(s"Wrote $numwrit bytes");*/ p success { numwrit } }
       def failed(e: Throwable, att: Void) = p failure { e }
     })
