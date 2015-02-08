@@ -3,6 +3,8 @@ package scat
 import java.net.InetSocketAddress
 
 import scat.Socket._
+import scat.Client._
+
 
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.Duration
@@ -15,80 +17,98 @@ import scala.concurrent.{Await, Future, Promise}
  */
 
 object RunClient extends App {
-
-  import scat.Client._
-
   val (sAddr, cSock) = (new InetSocketAddress(args(0).toInt), getClientSock(args(1).toInt))
   val kill = Promise[Unit]()
-
-  config(PreClient(cSock)) flatMap { ic =>
-    connect(ic, sAddr, kill) }
-
+  run(sAddr, cSock, kill)
   Await.result(kill.future, Duration.Inf)
 }
 
 trait Client
 case class PreClient(sock: SC) extends Client
-case class InitClient(sock: SC, handle: Array[Byte]) extends Client
+case class CfgClient(sock: SC, handle: Array[Byte]) extends Client
+case class CnctClient(sock: SC, handle: Array[Byte]) extends Client
+case class RmtClient(sock: SC, handle: Array[Byte]) extends Client
 
 object Client {
 
-  def config(cl: Client): Future[Client] =
-    cl match { case PreClient(sock) =>
-      getHandle(cl) flatMap { h =>
-        Future.successful(InitClient(sock, h)) } }
+  def run(sAddr: SAddr, cSock: SC, kill: Promise[Unit]): Future[Unit] =
+    config(PreClient(cSock)) flatMap { initCl =>
+      connectToServer(initCl, sAddr, kill) flatMap { cnctCl =>
+        shakeHands(cnctCl) flatMap { _ =>
+          listenToWire(cnctCl, kill)
+          listenToUser(cnctCl, kill) } } }
 
-  def getHandle(cl: Client): Future[Array[Byte]] =
-    cl match { case PreClient(_) =>
-      Future {
-        scala.io.StdIn.readLine("Welcome to scat! Please choose a handle...\n").getBytes } }
+  def config(cl: PreClient): Future[CfgClient] =
+    getHandle(cl) flatMap { h =>
+      Future.successful(
+        CfgClient(cl.sock, h)) } //}
 
-  def connect(cl: Client, sAddr: SAddr, kill: Promise[Unit]): Future[Unit] =
-    cl match { case InitClient(sock, _) =>
-      Socket.connect(sock, sAddr) flatMap { _ =>
-        listenToWire(cl)
-        listenToUser(cl, kill)
-        Future.successful(()) } }
+  def getHandle(cl: PreClient): Future[Array[Byte]] =
+    Future successful {
+        scala.io.StdIn.readLine("Welcome to scat! Please choose a handle...\n")
+          .getBytes }
 
-  def listenToWire(cl: Client): Future[Unit] =
-    cl match { case InitClient(sock, handle) =>
-      read(sock) flatMap { msg =>
-        print(s"${strFromWire(msg)}\n")
-        listenToWire(cl) } }
+  def connectToServer(cl: CfgClient, sAddr: SAddr, kill: Promise[Unit]): Future[CnctClient] =
+    connect(cl.sock, sAddr) flatMap { _ =>
+      Future successful {
+        CnctClient(cl.sock, cl.handle) } }
 
-  def listenToUser(cl: Client, kill: Promise[Unit]): Future[Unit] =
-    cl match { case InitClient(sock, handle) =>
-      Future { scala.io.StdIn.readLine().getBytes } flatMap { msg =>
-        dispatch(cl, msg) flatMap { cont =>
-          if (cont) {
-            listenToUser(cl, kill)
-            Future.successful(()) }
-          else {
-            kill success {()}
-            Future.successful(()) } } } }
+  def shakeHands(cl: CnctClient): Future[Unit] =
+    write(cl.sock,cl.handle)
+    //TODO add actual handshake exchange w/ possibility of failure
 
+  def listenToWire(cl: CnctClient, kill: Promise[Unit]): Future[Unit] =
+    read(cl.sock) flatMap { msg =>
+      dispatchIn(cl, msg, kill) flatMap { cont =>
+        if (cont) listenToWire(cl, kill)
+        else Future successful { () } } }
 
-  def dispatch(cl: Client, msg: Array[Byte]): Future[Boolean] =
-    cl match { case InitClient(sock, handle) =>
-      if (strFromWire(msg) == "exit") {
-        Future {
-          sock.close()
-          println(s"Closed connection with scat server") } flatMap { _ =>
-            Future.successful(false) } }
-      else {
-        write(format(cl, msg), sock)
-        Future.successful(true) } }
+  def dispatchIn(cl: CnctClient, msg: Array[Byte], kill: Promise[Unit]): Future[Boolean] =
+    if (strFromWire(msg) == "exit") {
+      doKill(cl,kill)
+      Future successful { false }
+    }
+    else {
+      println(s"${strFromWire(msg)}")
+      Future successful { true }
+    }
 
-  def humanHandle(cl: Client): String =
-    cl match { case InitClient(sock, handle) => handle.map{ _.toChar }.mkString }
+  def listenToUser(cl: CnctClient, kill: Promise[Unit]): Future[Unit] =
+    Future successful {
+      scala.io.StdIn.readLine().getBytes
+    } flatMap { msg =>
+      dispatchOut(cl,msg,kill) flatMap { cont =>
+        if (cont) {
+          listenToUser(cl, kill) }
+        else {
+          kill success {()}
+          Future.successful(()) } } }
 
-  def info(cl: Client): String =
-    cl match { case InitClient(sock, handle) =>
-      humanHandle(cl) + " @ " + sock.getRemoteAddress.toString }
+  def dispatchOut(cl: CnctClient, msg: Array[Byte], kill: Promise[Unit]): Future[Boolean] =
+    if (strFromWire(msg) == "exit") {
+      write(cl.sock, msg) flatMap { _ =>
+        doKill(cl, kill)
+        Future successful { false } } }
+    else {
+      write(cl.sock, format(cl, msg)) flatMap { _ =>
+        Future successful { true } } }
 
-  private def format(cl: Client, msg: Array[Byte]) : Array[Byte] =
-    cl match { case InitClient(sock, handle) =>
-      handle ++ ": ".getBytes ++ msg } // ++ "\n".getBytes
+  def doKill(cl: CnctClient, kill: Promise[Unit]): Future[Unit] =
+    Future {
+      cl.sock.close()
+      println(s"Closed connection with scat server")
+      kill success { () }
+      () }
+
+  def info(cl: Client): String = {
+    val (handle, addr) = cl match {
+      case CnctClient(s,h) => (h, s.getLocalAddress.toString)
+      case RmtClient(s,h) => (h, s.getRemoteAddress.toString)
+    }
+    handle.map(_.toChar).mkString + " @ " + addr }
+
+  private def format(cl: CnctClient, msg: Array[Byte]) : Array[Byte] =
+      cl.handle ++ ": ".getBytes ++ msg  // ++ "\n".getBytes
 
 }
 

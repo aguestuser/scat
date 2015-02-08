@@ -16,32 +16,16 @@ import scala.concurrent.Future
 
 
 
-trait ClientManager extends Logger {
+trait ClientManager {
 
-  def shakeHands(sock: SC): Future[Unit] = {
-    read(sock) flatMap { msg =>
+  def shakeHands(sock: SC): Future[RmtClient] = {
+    read(sock) flatMap { handle =>
+      val h = trimByteArray(handle)
+      Future.successful(RmtClient(sock, h)) } }
 
-    }
-  }
-
-  def parseHandShake(bs: Array[Byte]) = {
-    val (flag, rest) = bs.splitAt(4) match { case (h,t) => (sum(h),t) }
-
-
-  }
-
-  def parseOne(bs: Array[Byte], num: Int)
-
-
-
-  def addClient(client: Client) : Future[Unit] =
-    Future { clients putIfAbsent(client, true)}
-
-  def getHandle(cSock: SC): Future[Array[Byte]] =
-    write("Welcome to scat! Please choose a handle...\n".getBytes, cSock) flatMap { _ =>
-      read(cSock) map { msg =>
-        trimByteArray(msg) } }
-
+  def addClient(clients: CMap[RmtClient, Boolean], client: RmtClient): Future[RmtClient] =
+    Future { clients putIfAbsent(client, true) } flatMap { _ =>
+      Future.successful(client) }
 
   def sum(bs: Array[Byte]) : Int = (0 /: bs)((sum,b) => 256*sum + (b & 0xff))
   def sum(bs: List[Byte]) : Int = (0 /: bs)((sum,b) => 256*sum + (b & 0xff))

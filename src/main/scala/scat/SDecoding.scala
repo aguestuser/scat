@@ -6,8 +6,7 @@ package scat
  * License: GPLv2
  */
 
-trait sDecoding
-case class sList(l: List[sDecoding]) extends sDecoding
-case class sFlag(fl: Array[Byte]) extends sDecoding
-case class sHandle(h: Array[Byte]) extends sDecoding
-case class sMsg(msg: Array[Byte]) extends sDecoding
+trait SDecoding
+case class SList(l: List[SDecoding]) extends SDecoding
+case class SHandle(h: Array[Byte]) extends SDecoding
+case class SMsg(msg: Array[Byte]) extends SDecoding

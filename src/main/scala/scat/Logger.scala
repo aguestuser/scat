@@ -3,6 +3,9 @@ package scat
 import java.nio.channels.{AsynchronousServerSocketChannel => SSC, AsynchronousSocketChannel => SC}
 import java.util.Date
 
+import scat.Client._
+import scat.Socket._
+
 import scala.collection.concurrent.{TrieMap => CMap}
 import scala.concurrent.Future
 
@@ -21,16 +24,22 @@ trait Logger  {
         println(msg)
         Future.successful(())
       case Some(str) => // if some member of the hash map had that key, try again
-        log(logs, now, msg)
+        log(logs, new Date(), msg)
         Future.successful(()) } }
 
   def logConnection(logs: CMap[Date,String], sock: SC) : Future[Unit] =
       log(logs, new Date(), s"Client connection received from ${sock.getRemoteAddress}")
 
-  def logNewClient(logs: CMap[Date,String], cls: CMap[Client,Boolean], cl: Client) : Future[Unit] = {
-    log(logs, new Date(), s"Created new client: \n${Client.info(cl)}\n" +
+  def logNewClient(logs: CMap[Date,String], cls: CMap[RmtClient,Boolean], cl: RmtClient) :Future[Unit] =
+    log(logs, new Date(), s"Created new client: \n${info(cl)}\n" +
       s"${cls.size} total client(s): \n" +
-      s"${cls.keySet.map{ Client.info }.mkString("\n") }") }
+      s"${cls.keySet.map(info).toVector.sorted.mkString("\n")}")
+
+  def logClose(logs: CMap[Date,String], cl: RmtClient): Future[Unit] =
+    log(logs, new Date(), s"Closed connection with ${info(cl)}")
+
+  def logRelay(logs: CMap[Date,String], cl: RmtClient, msg: Array[Byte]): Future[Unit] =
+    log(logs, new Date(), s"Relayed message from ${info(cl)}\n${strFromWire(msg)}")
 
   def getLogs(logs: CMap[Date,String], num: Int): Vector[String] = {
     val ks = logs.keySet
